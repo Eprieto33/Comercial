@@ -1,0 +1,1090 @@
+# Comercial
+import React, { useState, useEffect, useMemo, useRef } from "react";
+
+/* ============================================================
+   CORTE DE CAJA — plataforma multi-sucursal
+   ============================================================ */
+
+const FONT_LINK_ID = "corte-caja-fonts";
+function ensureFonts() {
+  if (document.getElementById(FONT_LINK_ID)) return;
+  const link = document.createElement("link");
+  link.id = FONT_LINK_ID;
+  link.rel = "stylesheet";
+  link.href =
+    "https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=IBM+Plex+Mono:wght@400;500;600&family=Inter:wght@400;500;600;700&display=swap";
+  document.head.appendChild(link);
+}
+
+const DEFAULT_BRANCHES = [
+  { code: "DACA", name: "Acapulco" },
+  { code: "DAGU", name: "Aguascalientes" },
+  { code: "DCAN", name: "Cancún" },
+  { code: "DDF", name: "CDMX" },
+  { code: "DHER", name: "Hermosillo" },
+  { code: "DMOR", name: "Morelia" },
+  { code: "DPAZ", name: "La Paz" },
+  { code: "DREY", name: "Monterrey" },
+  { code: "DSLP", name: "San Luis Potosí" },
+  { code: "DTEP", name: "Tepic" },
+  { code: "DTIJ", name: "Tijuana" },
+  { code: "DTOR", name: "Torreón" },
+];
+
+const PAY_FIELDS = [
+  { key: "efectivo", label: "Efectivo", short: "Efvo" },
+  { key: "transfer", label: "Transferencia", short: "Transf" },
+  { key: "depositos", label: "Depósitos", short: "Depó" },
+  { key: "pcpay", label: "PC PAY", short: "PCPay" },
+  { key: "cdp", label: "Central de Pagos", short: "CdP" },
+  { key: "cdpAmex", label: "CDP AMEX", short: "CdPAmx" },
+  { key: "amex", label: "AMEX", short: "Amex" },
+  { key: "anticipo", label: "Anticipo", short: "Antic" },
+  { key: "credito", label: "Crédito", short: "Créd" },
+  { key: "notaCredito", label: "Nota Crédito", short: "N.Créd" },
+];
+
+const money = (n) =>
+  (Number(n) || 0).toLocaleString("es-MX", {
+    style: "currency",
+    currency: "MXN",
+    minimumFractionDigits: 2,
+  });
+const num = (n) => (Number(n) || 0).toLocaleString("es-MX", { maximumFractionDigits: 2 });
+const todayISO = () => new Date().toISOString().slice(0, 10);
+
+const emptyTransaction = () => ({
+  id: "t" + Math.random().toString(36).slice(2, 10),
+  persona: "",
+  ticket: "TVI",
+  pzas: "",
+  envios: "",
+  efectivo: "",
+  transfer: "",
+  depositos: "",
+  pcpay: "",
+  cdp: "",
+  cdpAmex: "",
+  amex: "",
+  anticipo: "",
+  credito: "",
+  notaCredito: "",
+});
+
+const emptyParcial = () => ({
+  id: "p" + Math.random().toString(36).slice(2, 10),
+  depositId: "",
+  monto: "",
+  locked: false,
+});
+
+const emptyCorte = () => ({
+  piezasSAP: "",
+  fondoFijo: "2827",
+  saldoDiaAnterior: "0",
+  transactions: [],
+  parciales: [],
+  updatedAt: null,
+});
+
+const storageKey = (branch, date) => `corte:${branch}:${date}`;
+
+async function getJSON(key, fallback) {
+  try {
+    const res = await window.storage.get(key, true);
+    if (!res) return fallback;
+    return JSON.parse(res.value);
+  } catch (e) {
+    return fallback;
+  }
+}
+async function setJSON(key, value) {
+  try {
+    await window.storage.set(key, JSON.stringify(value), true);
+    return true;
+  } catch (e) {
+    return false;
+  }
+}
+
+/* ============================================================ */
+
+export default function App() {
+  useEffect(ensureFonts, []);
+
+  const [branches, setBranches] = useState(DEFAULT_BRANCHES);
+  const [branch, setBranch] = useState(DEFAULT_BRANCHES[0].code);
+  const [date, setDate] = useState(todayISO());
+  const [corte, setCorte] = useState(emptyCorte());
+  const [cajeros, setCajeros] = useState([]);
+  const [tab, setTab] = useState("registrar");
+  const [loading, setLoading] = useState(true);
+  const [saveState, setSaveState] = useState("idle");
+  const [showAddBranch, setShowAddBranch] = useState(false);
+  const [newBranchCode, setNewBranchCode] = useState("");
+  const [newBranchName, setNewBranchName] = useState("");
+  const [error, setError] = useState("");
+  const saveTimer = useRef(null);
+  const firstLoad = useRef(true);
+
+  useEffect(() => {
+    (async () => {
+      const savedBranches = await getJSON("config:branches", null);
+      if (savedBranches && savedBranches.length) {
+        setBranches(savedBranches);
+        setBranch(savedBranches[0].code);
+      } else {
+        await setJSON("config:branches", DEFAULT_BRANCHES);
+      }
+      const savedCajeros = await getJSON("config:cajeros", null);
+      setCajeros(savedCajeros || []);
+    })();
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    setLoading(true);
+    firstLoad.current = true;
+    (async () => {
+      const data = await getJSON(storageKey(branch, date), emptyCorte());
+      if (!cancelled) {
+        setCorte({ ...emptyCorte(), ...data });
+        setLoading(false);
+        setTimeout(() => (firstLoad.current = false), 50);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [branch, date]);
+
+  useEffect(() => {
+    if (loading || firstLoad.current) return;
+    setSaveState("saving");
+    if (saveTimer.current) clearTimeout(saveTimer.current);
+    saveTimer.current = setTimeout(async () => {
+      const ok = await setJSON(storageKey(branch, date), { ...corte, updatedAt: new Date().toISOString() });
+      setSaveState(ok ? "saved" : "idle");
+    }, 600);
+    return () => clearTimeout(saveTimer.current);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [corte]);
+
+  const totals = useMemo(() => {
+    const t = {};
+    PAY_FIELDS.forEach((f) => (t[f.key] = 0));
+    let pzas = 0,
+      envios = 0,
+      count = 0;
+    corte.transactions.forEach((row) => {
+      count++;
+      pzas += Number(row.pzas) || 0;
+      envios += Number(row.envios) || 0;
+      PAY_FIELDS.forEach((f) => (t[f.key] += Number(row[f.key]) || 0));
+    });
+    const grandTotal = PAY_FIELDS.reduce((s, f) => s + t[f.key], 0);
+    return { byMethod: t, pzas, envios, totalPzas: pzas, grandTotal, count };
+  }, [corte.transactions]);
+
+  const parcialesTotal = useMemo(
+    () => corte.parciales.reduce((s, p) => s + (Number(p.monto) || 0), 0),
+    [corte.parciales]
+  );
+
+  const piezasSAP = Number(corte.piezasSAP) || 0;
+  const diferenciaPiezas = piezasSAP - totals.totalPzas;
+  const efectivoTotal = totals.byMethod.efectivo;
+  const diferenciaFlujoEfectivo = efectivoTotal - parcialesTotal;
+  const saldoDiaAnterior = Number(corte.saldoDiaAnterior) || 0;
+  const totalSaldos = diferenciaFlujoEfectivo + saldoDiaAnterior;
+  const fondoFijo = Number(corte.fondoFijo) || 0;
+  const aperturaSiguienteDia = totalSaldos + fondoFijo;
+  const balanceado = Math.abs(diferenciaFlujoEfectivo) < 0.01;
+
+  const updateField = (key, value) => setCorte((c) => ({ ...c, [key]: value }));
+
+  const addTransaction = () =>
+    setCorte((c) => ({ ...c, transactions: [...c.transactions, emptyTransaction()] }));
+
+  const updateTransaction = (id, field, value) =>
+    setCorte((c) => ({
+      ...c,
+      transactions: c.transactions.map((r) => (r.id === id ? { ...r, [field]: value } : r)),
+    }));
+
+  const setPersona = (id, name) => {
+    const cajero = cajeros.find((c) => c.name === name);
+    setCorte((c) => ({
+      ...c,
+      transactions: c.transactions.map((r) =>
+        r.id === id
+          ? { ...r, persona: name, efectivo: cajero?.efectivoBloqueado ? "" : r.efectivo }
+          : r
+      ),
+    }));
+  };
+
+  const deleteTransaction = (id) =>
+    setCorte((c) => ({ ...c, transactions: c.transactions.filter((r) => r.id !== id) }));
+
+  const registrarParcial = (depositId, monto) =>
+    setCorte((c) => ({
+      ...c,
+      parciales: [...c.parciales, { ...emptyParcial(), depositId, monto, locked: true }],
+    }));
+
+  const addBranch = async () => {
+    const code = newBranchCode.trim().toUpperCase();
+    const name = newBranchName.trim();
+    if (!code || !name) return setError("Escribe código y nombre de la sucursal.");
+    if (branches.some((b) => b.code === code)) return setError("Ese código ya existe.");
+    const list = [...branches, { code, name }];
+    setBranches(list);
+    await setJSON("config:branches", list);
+    setBranch(code);
+    setNewBranchCode("");
+    setNewBranchName("");
+    setShowAddBranch(false);
+    setError("");
+  };
+
+  const addCajero = async (name, efectivoBloqueado) => {
+    const clean = name.trim();
+    if (!clean) return;
+    if (cajeros.some((c) => c.name.toLowerCase() === clean.toLowerCase())) return;
+    const list = [...cajeros, { id: "c" + Math.random().toString(36).slice(2, 9), name: clean, efectivoBloqueado }];
+    setCajeros(list);
+    await setJSON("config:cajeros", list);
+  };
+
+  const toggleCajeroLock = async (id) => {
+    const list = cajeros.map((c) => (c.id === id ? { ...c, efectivoBloqueado: !c.efectivoBloqueado } : c));
+    setCajeros(list);
+    await setJSON("config:cajeros", list);
+  };
+
+  const deleteCajero = async (id) => {
+    const list = cajeros.filter((c) => c.id !== id);
+    setCajeros(list);
+    await setJSON("config:cajeros", list);
+  };
+
+  const branchName = branches.find((b) => b.code === branch)?.name || branch;
+  const usedTickets = corte.transactions.map((t) => t.ticket);
+
+  return (
+    <div className="app">
+      <style>{CSS}</style>
+
+      <header className="topbar">
+        <div className="brand">
+          <div className="brand-mark">CC</div>
+          <div>
+            <div className="brand-title">Corte de Caja</div>
+            <div className="brand-sub">Registro diario · {branches.length} sucursales</div>
+          </div>
+        </div>
+
+        <div className="selectors">
+          <label className="sel">
+            <span>Sucursal</span>
+            <select value={branch} onChange={(e) => setBranch(e.target.value)}>
+              {branches.map((b) => (
+                <option key={b.code} value={b.code}>
+                  {b.code} · {b.name}
+                </option>
+              ))}
+            </select>
+          </label>
+          <button className="ghost-btn small" onClick={() => setShowAddBranch((v) => !v)}>
+            + sucursal
+          </button>
+          <label className="sel">
+            <span>Fecha</span>
+            <input type="date" value={date} onChange={(e) => setDate(e.target.value)} />
+          </label>
+          <div className={"save-chip " + saveState}>
+            {saveState === "saving" ? "Guardando…" : saveState === "saved" ? "Guardado ✓" : "—"}
+          </div>
+        </div>
+      </header>
+
+      {showAddBranch && (
+        <div className="add-branch-panel">
+          <input placeholder="Código (ej. DQRO)" value={newBranchCode} onChange={(e) => setNewBranchCode(e.target.value)} />
+          <input placeholder="Nombre (ej. Querétaro)" value={newBranchName} onChange={(e) => setNewBranchName(e.target.value)} />
+          <button className="primary-btn small" onClick={addBranch}>Agregar</button>
+          {error && <span className="error-text">{error}</span>}
+        </div>
+      )}
+
+      <nav className="tabs">
+        {[
+          ["registrar", "Registrar ventas"],
+          ["resumen", "Resumen y conciliación"],
+          ["parciales", "Depósitos / Brinks"],
+          ["tablero", "Tablero"],
+          ["comparativo", "Comparativo sucursales"],
+          ["cajeros", "Cajeros"],
+          ["historial", "Historial"],
+        ].map(([key, label]) => (
+          <button key={key} className={"tab" + (tab === key ? " active" : "")} onClick={() => setTab(key)}>
+            {label}
+          </button>
+        ))}
+      </nav>
+
+      <main className="content">
+        {loading ? (
+          <div className="loading">Cargando corte de {branchName}…</div>
+        ) : (
+          <>
+            {tab === "registrar" && (
+              <RegistrarTab
+                corte={corte}
+                totals={totals}
+                cajeros={cajeros}
+                usedTickets={usedTickets}
+                addTransaction={addTransaction}
+                updateTransaction={updateTransaction}
+                setPersona={setPersona}
+                deleteTransaction={deleteTransaction}
+              />
+            )}
+            {tab === "resumen" && (
+              <ResumenTab
+                corte={corte}
+                updateField={updateField}
+                totals={totals}
+                diferenciaPiezas={diferenciaPiezas}
+                efectivoTotal={efectivoTotal}
+                parcialesTotal={parcialesTotal}
+                diferenciaFlujoEfectivo={diferenciaFlujoEfectivo}
+                totalSaldos={totalSaldos}
+                fondoFijo={fondoFijo}
+                aperturaSiguienteDia={aperturaSiguienteDia}
+                balanceado={balanceado}
+                branchName={branchName}
+                date={date}
+              />
+            )}
+            {tab === "parciales" && (
+              <ParcialesTab
+                corte={corte}
+                parcialesTotal={parcialesTotal}
+                efectivoTotal={efectivoTotal}
+                registrarParcial={registrarParcial}
+              />
+            )}
+            {tab === "tablero" && (
+              <TableroTab
+                corte={corte}
+                totals={totals}
+                branchName={branchName}
+                date={date}
+                diferenciaPiezas={diferenciaPiezas}
+                efectivoTotal={efectivoTotal}
+                parcialesTotal={parcialesTotal}
+                diferenciaFlujoEfectivo={diferenciaFlujoEfectivo}
+                totalSaldos={totalSaldos}
+                fondoFijo={fondoFijo}
+                aperturaSiguienteDia={aperturaSiguienteDia}
+              />
+            )}
+            {tab === "comparativo" && <ComparativoTab branches={branches} date={date} />}
+            {tab === "cajeros" && (
+              <CajerosTab cajeros={cajeros} addCajero={addCajero} toggleCajeroLock={toggleCajeroLock} deleteCajero={deleteCajero} />
+            )}
+            {tab === "historial" && (
+              <HistorialTab
+                branch={branch}
+                branchName={branchName}
+                currentDate={date}
+                onSelectDate={(d) => {
+                  setDate(d);
+                  setTab("resumen");
+                }}
+              />
+            )}
+          </>
+        )}
+      </main>
+
+      <footer className="foot">
+        Los datos se guardan automáticamente y son visibles para cualquiera que use este mismo enlace.
+      </footer>
+    </div>
+  );
+}
+
+/* ============================================================ TICKET INPUT (con validación de duplicados) */
+function TicketInput({ value, otherTickets, onCommit }) {
+  const [local, setLocal] = useState(value);
+  const [warn, setWarn] = useState("");
+  useEffect(() => setLocal(value), [value]);
+
+  const commit = () => {
+    const trimmed = local.trim();
+    const dup = trimmed && otherTickets.some((t) => (t || "").trim().toUpperCase() === trimmed.toUpperCase());
+    if (dup) {
+      setWarn("Ese ticket ya existe, no se guardó");
+      setLocal(value);
+      setTimeout(() => setWarn(""), 2600);
+      return;
+    }
+    onCommit(trimmed);
+  };
+
+  return (
+    <div className="ticket-wrap">
+      <input
+        className="tx-inline ticket"
+        value={local}
+        onClick={(e) => e.stopPropagation()}
+        onChange={(e) => setLocal(e.target.value)}
+        onBlur={commit}
+        placeholder="TVI…"
+      />
+      {warn && <span className="ticket-warn">{warn}</span>}
+    </div>
+  );
+}
+
+/* ============================================================ REGISTRAR VENTAS */
+function RegistrarTab({ corte, totals, cajeros, usedTickets, addTransaction, updateTransaction, setPersona, deleteTransaction }) {
+  const [openRow, setOpenRow] = useState(null);
+
+  return (
+    <div className="panel">
+      <div className="panel-head">
+        <div>
+          <h2>Ventas del día</h2>
+          <p className="muted">
+            {totals.count} tickets · <b>{num(totals.pzas)} piezas</b> · {money(totals.grandTotal)} total
+          </p>
+        </div>
+        <button className="primary-btn" onClick={addTransaction}>+ Nueva venta</button>
+      </div>
+
+      {corte.transactions.length === 0 ? (
+        <div className="empty">Aún no hay ventas registradas hoy. Toca <b>+ Nueva venta</b> para capturar el primer ticket.</div>
+      ) : (
+        <div className="tx-list">
+          {corte.transactions.map((row, i) => {
+            const rowTotal = PAY_FIELDS.reduce((s, f) => s + (Number(row[f.key]) || 0), 0);
+            const isOpen = openRow === row.id;
+            const cajero = cajeros.find((c) => c.name === row.persona);
+            const efectivoLocked = !!cajero?.efectivoBloqueado;
+            const otherTickets = usedTickets.filter((_, idx) => corte.transactions[idx].id !== row.id);
+
+            return (
+              <div className={"tx-card" + (isOpen ? " open" : "")} key={row.id}>
+                <div className="tx-row-summary" onClick={() => setOpenRow(isOpen ? null : row.id)}>
+                  <span className="tx-no">{i + 1}</span>
+                  <select
+                    className="tx-inline persona-select"
+                    value={row.persona}
+                    onClick={(e) => e.stopPropagation()}
+                    onChange={(e) => setPersona(row.id, e.target.value)}
+                  >
+                    <option value="">Cajero…</option>
+                    {cajeros.map((c) => (
+                      <option key={c.id} value={c.name}>
+                        {c.name}{c.efectivoBloqueado ? " (sin efvo)" : ""}
+                      </option>
+                    ))}
+                  </select>
+                  <TicketInput
+                    value={row.ticket}
+                    otherTickets={otherTickets}
+                    onCommit={(v) => updateTransaction(row.id, "ticket", v)}
+                  />
+                  <span className="tx-total">{money(rowTotal)}</span>
+                  <button
+                    className="icon-btn danger"
+                    onClick={(e) => { e.stopPropagation(); deleteTransaction(row.id); }}
+                    title="Eliminar"
+                  >✕</button>
+                  <span className="chevron">{isOpen ? "▲" : "▼"}</span>
+                </div>
+
+                {isOpen && (
+                  <div className="tx-detail">
+                    <div className="detail-group">
+                      <h4>Piezas</h4>
+                      <div className="grid3">
+                        <Field label="Piezas" type="number" value={row.pzas} onChange={(v) => updateTransaction(row.id, "pzas", v)} />
+                        <Field label="Envíos" type="number" value={row.envios} onChange={(v) => updateTransaction(row.id, "envios", v)} />
+                      </div>
+                    </div>
+
+                    <div className="detail-group">
+                      <h4>Desglose de pago</h4>
+                      {efectivoLocked && (
+                        <div className="lock-note">🔒 {row.persona} tiene el efectivo bloqueado para este corte.</div>
+                      )}
+                      <div className="grid3 money-grid">
+                        {PAY_FIELDS.map((f) =>
+                          f.key === "efectivo" ? (
+                            <Field
+                              key={f.key}
+                              label={f.label}
+                              type="number"
+                              money
+                              value={efectivoLocked ? "" : row.efectivo}
+                              onChange={(v) => updateTransaction(row.id, f.key, v)}
+                              disabled={efectivoLocked}
+                            />
+                          ) : (
+                            <Field
+                              key={f.key}
+                              label={f.label}
+                              type="number"
+                              money
+                              value={row[f.key]}
+                              onChange={(v) => updateTransaction(row.id, f.key, v)}
+                            />
+                          )
+                        )}
+                      </div>
+                      <div className="row-total-line">Total del ticket: <b>{money(rowTotal)}</b></div>
+                    </div>
+                  </div>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+      {corte.transactions.length > 0 && (
+        <div className="totals-bar">
+          <span>Piezas: <b>{num(totals.pzas)}</b></span>
+          <span>Envíos: <b>{num(totals.envios)}</b></span>
+          {PAY_FIELDS.map((f) => (
+            <span key={f.key}>{f.short}: <b>{money(totals.byMethod[f.key])}</b></span>
+          ))}
+          <span className="grand">Total: <b>{money(totals.grandTotal)}</b></span>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function Field({ label, value, onChange, type = "text", money: isMoney, wide, disabled }) {
+  return (
+    <label className={"field" + (wide ? " wide" : "") + (disabled ? " disabled" : "")}>
+      <span>{label}</span>
+      <div className={"field-input" + (isMoney ? " money" : "")}>
+        {isMoney && <span className="prefix">$</span>}
+        <input
+          type={type}
+          inputMode={type === "number" ? "decimal" : undefined}
+          value={value}
+          disabled={disabled}
+          onChange={(e) => onChange(e.target.value)}
+          placeholder={isMoney ? "0.00" : ""}
+        />
+      </div>
+    </label>
+  );
+}
+
+/* ============================================================ RESUMEN */
+function ResumenTab(props) {
+  const { corte, updateField, totals, diferenciaPiezas, efectivoTotal, parcialesTotal, diferenciaFlujoEfectivo, totalSaldos, fondoFijo, aperturaSiguienteDia, balanceado, branchName, date } = props;
+
+  return (
+    <div className="panel">
+      <div className="panel-head">
+        <div>
+          <h2>Resumen del día</h2>
+          <p className="muted">{branchName} · {date}</p>
+        </div>
+        <div className={"balance-pill " + (balanceado ? "ok" : "off")}>
+          {balanceado ? "Caja balanceada" : "Hay diferencia"}
+        </div>
+      </div>
+
+      <div className="cards-grid">
+        <div className="card">
+          <div className="card-label">Total del día</div>
+          <div className="card-value">{money(totals.grandTotal)}</div>
+          <div className="card-sub">{totals.count} tickets</div>
+        </div>
+        <div className="card">
+          <div className="card-label">Efectivo en caja</div>
+          <div className="card-value">{money(efectivoTotal)}</div>
+        </div>
+        <div className="card">
+          <div className="card-label">Apertura día siguiente</div>
+          <div className="card-value">{money(aperturaSiguienteDia)}</div>
+        </div>
+      </div>
+
+      <div className="two-col">
+        <div className="block">
+          <h3>Conciliación de piezas (SAP)</h3>
+          <Field label="Piezas SAP" type="number" value={corte.piezasSAP} onChange={(v) => updateField("piezasSAP", v)} />
+          <div className="kv"><span>Piezas por ticket</span><b>{num(totals.totalPzas)}</b></div>
+          <div className={"kv " + (Math.abs(diferenciaPiezas) < 0.01 ? "good" : "bad")}>
+            <span>Diferencia piezas</span><b>{num(diferenciaPiezas)}</b>
+          </div>
+        </div>
+
+        <div className="block">
+          <h3>Flujo de efectivo</h3>
+          <div className="kv"><span>Parciales (Brinks)</span><b>{money(parcialesTotal)}</b></div>
+          <div className="kv"><span>Efectivo (tickets)</span><b>{money(efectivoTotal)}</b></div>
+          <div className={"kv " + (balanceado ? "good" : "bad")}>
+            <span>Diferencia flujo efectivo</span><b>{money(diferenciaFlujoEfectivo)}</b>
+          </div>
+          <Field label="Saldo día anterior" type="number" money value={corte.saldoDiaAnterior} onChange={(v) => updateField("saldoDiaAnterior", v)} />
+          <div className="kv"><span>Total saldos</span><b>{money(totalSaldos)}</b></div>
+          <Field label="Fondo fijo" type="number" money value={corte.fondoFijo} onChange={(v) => updateField("fondoFijo", v)} />
+          <div className="kv strong"><span>Apertura siguiente día</span><b>{money(aperturaSiguienteDia)}</b></div>
+        </div>
+      </div>
+
+      <div className="block">
+        <h3>Resumen por método de pago</h3>
+        <table className="method-table">
+          <thead><tr><th>Método</th><th>Total</th></tr></thead>
+          <tbody>
+            {PAY_FIELDS.map((f) => (
+              <tr key={f.key}><td>{f.label}</td><td>{money(totals.byMethod[f.key])}</td></tr>
+            ))}
+            <tr className="total-row"><td>Total general</td><td>{money(totals.grandTotal)}</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
+/* ============================================================ DEPÓSITOS / BRINKS (ledger inmutable) */
+function ParcialesTab({ corte, parcialesTotal, efectivoTotal, registrarParcial }) {
+  const [depositId, setDepositId] = useState("");
+  const [monto, setMonto] = useState("");
+  const diff = efectivoTotal - parcialesTotal;
+
+  const submit = () => {
+    if (!depositId.trim() || !monto || Number(monto) <= 0) return;
+    registrarParcial(depositId.trim(), monto);
+    setDepositId("");
+    setMonto("");
+  };
+
+  return (
+    <div className="panel">
+      <div className="panel-head">
+        <div>
+          <h2>Depósitos / Brinks</h2>
+          <p className="muted">Cada depósito registrado queda bloqueado y no se puede editar ni borrar — solo se van acumulando.</p>
+        </div>
+      </div>
+
+      <div className="block">
+        <h3>Registrar nuevo depósito</h3>
+        <div className="grid3">
+          <label className="field">
+            <span>Deposit ID</span>
+            <div className="field-input"><input value={depositId} onChange={(e) => setDepositId(e.target.value)} placeholder="Deposit Id." /></div>
+          </label>
+          <label className="field">
+            <span>Monto</span>
+            <div className="field-input money">
+              <span className="prefix">$</span>
+              <input type="number" inputMode="decimal" value={monto} onChange={(e) => setMonto(e.target.value)} placeholder="0.00" />
+            </div>
+          </label>
+        </div>
+        <button className="primary-btn" style={{ marginTop: 12 }} onClick={submit}>🔒 Registrar depósito (no se podrá editar)</button>
+      </div>
+
+      {corte.parciales.length === 0 ? (
+        <div className="empty">Sin depósitos registrados todavía.</div>
+      ) : (
+        <table className="parciales-table">
+          <thead><tr><th>#</th><th>Deposit ID</th><th>Monto</th><th></th></tr></thead>
+          <tbody>
+            {corte.parciales.map((p, i) => (
+              <tr key={p.id}>
+                <td>{i + 1}</td>
+                <td>{p.depositId}</td>
+                <td>{money(p.monto)}</td>
+                <td className="locked-icon">🔒</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+
+      <div className="totals-bar">
+        <span>Total parciales: <b>{money(parcialesTotal)}</b></span>
+        <span>Efectivo en tickets: <b>{money(efectivoTotal)}</b></span>
+        <span className={diff === 0 ? "grand good" : "grand bad"}>Diferencia: <b>{money(diff)}</b></span>
+      </div>
+    </div>
+  );
+}
+
+/* ============================================================ TABLERO (vista tipo hoja de cálculo) */
+function TableroTab(props) {
+  const { corte, totals, branchName, date, diferenciaPiezas, efectivoTotal, parcialesTotal, diferenciaFlujoEfectivo, totalSaldos, fondoFijo, aperturaSiguienteDia } = props;
+
+  return (
+    <div className="panel">
+      <div className="panel-head">
+        <div>
+          <h2>Tablero — {branchName}</h2>
+          <p className="muted">{date} · vista en vivo con la estructura del corte</p>
+        </div>
+      </div>
+
+      <div className="tablero-scroll">
+        <table className="tablero-table">
+          <thead>
+            <tr>
+              <th>No.</th><th>Persona</th><th>Ticket</th><th>Pzas</th><th>Envíos</th>
+              {PAY_FIELDS.map((f) => <th key={f.key}>{f.short}</th>)}
+              <th>Total</th>
+            </tr>
+          </thead>
+          <tbody>
+            {corte.transactions.map((row, i) => {
+              const rowTotal = PAY_FIELDS.reduce((s, f) => s + (Number(row[f.key]) || 0), 0);
+              return (
+                <tr key={row.id}>
+                  <td>{i + 1}</td>
+                  <td>{row.persona || "—"}</td>
+                  <td className="mono">{row.ticket}</td>
+                  <td className="mono">{num(row.pzas)}</td>
+                  <td className="mono">{num(row.envios)}</td>
+                  {PAY_FIELDS.map((f) => <td key={f.key} className="mono">{money(row[f.key])}</td>)}
+                  <td className="mono strong">{money(rowTotal)}</td>
+                </tr>
+              );
+            })}
+          </tbody>
+          <tfoot>
+            <tr>
+              <td colSpan={3}>Totales</td>
+              <td className="mono">{num(totals.pzas)}</td>
+              <td className="mono">{num(totals.envios)}</td>
+              {PAY_FIELDS.map((f) => <td key={f.key} className="mono">{money(totals.byMethod[f.key])}</td>)}
+              <td className="mono strong">{money(totals.grandTotal)}</td>
+            </tr>
+          </tfoot>
+        </table>
+      </div>
+
+      <div className="tablero-grid">
+        <div className="block">
+          <h3>Doctos de material (SAP)</h3>
+          <div className="kv"><span>Piezas SAP</span><b>{num(corte.piezasSAP)}</b></div>
+          <div className="kv"><span>Piezas ticket</span><b>{num(totals.totalPzas)}</b></div>
+          <div className={"kv " + (Math.abs(diferenciaPiezas) < 0.01 ? "good" : "bad")}><span>Diferencia</span><b>{num(diferenciaPiezas)}</b></div>
+        </div>
+        <div className="block">
+          <h3>Flujo de efectivo (SAP)</h3>
+          <div className="kv"><span>Parciales</span><b>{money(parcialesTotal)}</b></div>
+          <div className="kv"><span>Efectivo</span><b>{money(efectivoTotal)}</b></div>
+          <div className={"kv " + (Math.abs(diferenciaFlujoEfectivo) < 0.01 ? "good" : "bad")}><span>Diferencia</span><b>{money(diferenciaFlujoEfectivo)}</b></div>
+          <div className="kv"><span>Total saldos</span><b>{money(totalSaldos)}</b></div>
+          <div className="kv"><span>Fondo fijo</span><b>{money(fondoFijo)}</b></div>
+          <div className="kv strong"><span>Apertura sig. día</span><b>{money(aperturaSiguienteDia)}</b></div>
+        </div>
+        <div className="block">
+          <h3>Parciales (Brinks)</h3>
+          {corte.parciales.length === 0 ? (
+            <p className="muted">Sin depósitos.</p>
+          ) : (
+            corte.parciales.map((p, i) => (
+              <div className="kv" key={p.id}><span>{i + 1}. {p.depositId}</span><b>{money(p.monto)}</b></div>
+            ))
+          )}
+          <div className="kv strong"><span>Total parciales</span><b>{money(parcialesTotal)}</b></div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* ============================================================ COMPARATIVO */
+function ComparativoTab({ branches, date }) {
+  const [rows, setRows] = useState(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    setRows(null);
+    (async () => {
+      const results = await Promise.all(
+        branches.map(async (b) => {
+          const data = await getJSON(storageKey(b.code, date), null);
+          if (!data) return { ...b, total: 0, efectivo: 0, tickets: 0, diff: 0, hasData: false };
+          let total = 0, efectivo = 0;
+          (data.transactions || []).forEach((row) => {
+            PAY_FIELDS.forEach((f) => (total += Number(row[f.key]) || 0));
+            efectivo += Number(row.efectivo) || 0;
+          });
+          const parcialesTotal = (data.parciales || []).reduce((s, p) => s + (Number(p.monto) || 0), 0);
+          return { ...b, total, efectivo, tickets: (data.transactions || []).length, diff: efectivo - parcialesTotal, hasData: true };
+        })
+      );
+      if (!cancelled) setRows(results);
+    })();
+    return () => { cancelled = true; };
+  }, [branches, date]);
+
+  const grandTotal = rows ? rows.reduce((s, r) => s + r.total, 0) : 0;
+
+  return (
+    <div className="panel">
+      <div className="panel-head">
+        <div><h2>Comparativo por sucursal</h2><p className="muted">{date}</p></div>
+        <div className="card compact"><div className="card-label">Total todas las sucursales</div><div className="card-value">{money(grandTotal)}</div></div>
+      </div>
+      {!rows ? (
+        <div className="loading">Cargando sucursales…</div>
+      ) : (
+        <table className="method-table">
+          <thead><tr><th>Sucursal</th><th>Tickets</th><th>Efectivo</th><th>Total</th><th>Dif. flujo</th></tr></thead>
+          <tbody>
+            {rows.map((r) => (
+              <tr key={r.code} className={!r.hasData ? "muted-row" : ""}>
+                <td>{r.code} · {r.name}</td><td>{r.tickets}</td><td>{money(r.efectivo)}</td><td>{money(r.total)}</td>
+                <td className={r.hasData && Math.abs(r.diff) > 0.01 ? "bad-text" : ""}>{r.hasData ? money(r.diff) : "—"}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+    </div>
+  );
+}
+
+/* ============================================================ CAJEROS */
+function CajerosTab({ cajeros, addCajero, toggleCajeroLock, deleteCajero }) {
+  const [name, setName] = useState("");
+  const [lockCash, setLockCash] = useState(false);
+
+  const submit = () => {
+    if (!name.trim()) return;
+    addCajero(name, lockCash);
+    setName("");
+    setLockCash(false);
+  };
+
+  return (
+    <div className="panel">
+      <div className="panel-head">
+        <div>
+          <h2>Cajeros</h2>
+          <p className="muted">Administra qué cajeros pueden cobrar en efectivo.</p>
+        </div>
+      </div>
+
+      <div className="block">
+        <div className="grid3" style={{ alignItems: "end" }}>
+          <label className="field">
+            <span>Nombre del cajero</span>
+            <div className="field-input"><input value={name} onChange={(e) => setName(e.target.value)} placeholder="Nombre" /></div>
+          </label>
+          <label className="checkbox-field">
+            <input type="checkbox" checked={lockCash} onChange={(e) => setLockCash(e.target.checked)} />
+            <span>Bloquear efectivo para este cajero</span>
+          </label>
+          <button className="primary-btn" onClick={submit}>+ Agregar cajero</button>
+        </div>
+      </div>
+
+      {cajeros.length === 0 ? (
+        <div className="empty">Aún no hay cajeros registrados.</div>
+      ) : (
+        <table className="method-table">
+          <thead><tr><th>Cajero</th><th>Efectivo</th><th></th></tr></thead>
+          <tbody>
+            {cajeros.map((c) => (
+              <tr key={c.id}>
+                <td>{c.name}</td>
+                <td>
+                  <button className={"toggle-pill " + (c.efectivoBloqueado ? "off" : "ok")} onClick={() => toggleCajeroLock(c.id)}>
+                    {c.efectivoBloqueado ? "🔒 Bloqueado" : "✓ Permitido"}
+                  </button>
+                </td>
+                <td><button className="icon-btn danger" onClick={() => deleteCajero(c.id)}>✕</button></td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+    </div>
+  );
+}
+
+/* ============================================================ HISTORIAL */
+function HistorialTab({ branch, branchName, currentDate, onSelectDate }) {
+  const [dates, setDates] = useState(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    setDates(null);
+    (async () => {
+      try {
+        const res = await window.storage.list(`corte:${branch}:`, true);
+        const keys = (res && res.keys) || [];
+        const ds = keys.map((k) => k.split(":")[2]).filter(Boolean).sort().reverse();
+        if (!cancelled) setDates(ds);
+      } catch (e) {
+        if (!cancelled) setDates([]);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [branch]);
+
+  return (
+    <div className="panel">
+      <div className="panel-head">
+        <div><h2>Historial — {branchName}</h2><p className="muted">Toca una fecha para abrirla en Resumen.</p></div>
+      </div>
+      {!dates ? (
+        <div className="loading">Cargando historial…</div>
+      ) : dates.length === 0 ? (
+        <div className="empty">Todavía no hay cortes guardados para esta sucursal.</div>
+      ) : (
+        <div className="history-list">
+          {dates.map((d) => (
+            <button key={d} className={"history-item" + (d === currentDate ? " active" : "")} onClick={() => onSelectDate(d)}>{d}</button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ============================================================ */
+const CSS = `
+:root{
+  --bg:#F6F4EF; --surface:#FFFFFF; --ink:#1E2521; --ink-soft:#5B6560; --line:#E3DFD4;
+  --accent:#0F6B4C; --accent-soft:#E4F1EB; --warn:#B23A24; --warn-soft:#FBEAE5;
+  --mono:'IBM Plex Mono', monospace; --display:'Space Grotesk', sans-serif; --body:'Inter', sans-serif;
+}
+*{box-sizing:border-box;}
+.app{ font-family:var(--body); color:var(--ink); background:var(--bg); min-height:100%; padding-bottom:40px; }
+.topbar{ display:flex; flex-wrap:wrap; gap:16px; align-items:center; justify-content:space-between; padding:18px 20px; border-bottom:1px solid var(--line); background:var(--surface); }
+.brand{ display:flex; align-items:center; gap:12px; }
+.brand-mark{ width:38px; height:38px; border-radius:9px; background:var(--ink); color:var(--bg); display:flex; align-items:center; justify-content:center; font-family:var(--mono); font-weight:600; font-size:13px; }
+.brand-title{ font-family:var(--display); font-weight:700; font-size:18px; letter-spacing:-0.01em; }
+.brand-sub{ font-size:12px; color:var(--ink-soft); }
+.selectors{ display:flex; align-items:flex-end; gap:10px; flex-wrap:wrap; }
+.sel{ display:flex; flex-direction:column; font-size:11px; color:var(--ink-soft); gap:4px; text-transform:uppercase; letter-spacing:.04em; }
+.sel select, .sel input{ font-family:var(--body); font-size:14px; padding:7px 10px; border-radius:8px; border:1px solid var(--line); background:var(--bg); color:var(--ink); }
+.ghost-btn{ background:transparent; border:1px solid var(--line); border-radius:8px; padding:8px 12px; cursor:pointer; font-size:13px; color:var(--ink); }
+.ghost-btn.small{ padding:6px 10px; font-size:12px; align-self:flex-end; }
+.ghost-btn:hover{ background:var(--accent-soft); border-color:var(--accent); }
+.save-chip{ font-family:var(--mono); font-size:11px; padding:6px 10px; border-radius:20px; background:var(--line); color:var(--ink-soft); align-self:flex-end; }
+.save-chip.saved{ background:var(--accent-soft); color:var(--accent); }
+.save-chip.saving{ background:#FDF3E0; color:#8A5A00; }
+.add-branch-panel{ display:flex; gap:10px; flex-wrap:wrap; align-items:center; padding:12px 20px; background:var(--accent-soft); border-bottom:1px solid var(--line); }
+.add-branch-panel input{ padding:7px 10px; border-radius:8px; border:1px solid var(--line); font-size:13px; }
+.error-text{ color:var(--warn); font-size:12px; }
+.tabs{ display:flex; gap:2px; padding:10px 20px 0; overflow-x:auto; background:var(--surface); border-bottom:1px solid var(--line); }
+.tab{ font-family:var(--body); font-weight:600; font-size:13px; padding:10px 16px; background:transparent; border:none; cursor:pointer; color:var(--ink-soft); border-bottom:2px solid transparent; white-space:nowrap; }
+.tab.active{ color:var(--ink); border-bottom-color:var(--accent); }
+.content{ max-width:1080px; margin:0 auto; padding:22px 20px; }
+.loading, .empty{ padding:40px 20px; text-align:center; color:var(--ink-soft); background:var(--surface); border-radius:12px; border:1px dashed var(--line); }
+.panel-head{ display:flex; justify-content:space-between; align-items:flex-start; gap:16px; margin-bottom:18px; flex-wrap:wrap; }
+.panel-head h2{ font-family:var(--display); font-size:20px; margin:0 0 2px; }
+.muted{ color:var(--ink-soft); font-size:13px; margin:0; }
+.primary-btn{ font-family:var(--body); font-weight:600; background:var(--ink); color:var(--bg); border:none; border-radius:9px; padding:10px 16px; cursor:pointer; font-size:14px; }
+.primary-btn:hover{ background:var(--accent); }
+.primary-btn.small{ padding:7px 12px; font-size:13px; }
+.balance-pill{ font-family:var(--mono); font-size:12px; padding:6px 12px; border-radius:20px; }
+.balance-pill.ok{ background:var(--accent-soft); color:var(--accent); }
+.balance-pill.off{ background:var(--warn-soft); color:var(--warn); }
+
+.tx-list{ display:flex; flex-direction:column; gap:8px; }
+.tx-card{ background:var(--surface); border:1px solid var(--line); border-radius:12px; overflow:hidden; }
+.tx-card.open{ border-color:var(--accent); }
+.tx-row-summary{ display:flex; align-items:center; gap:10px; padding:10px 14px; cursor:pointer; }
+.tx-no{ font-family:var(--mono); color:var(--ink-soft); width:22px; font-size:13px; }
+.tx-inline{ border:none; background:transparent; font-size:14px; padding:6px 4px; flex:1; min-width:0; color:var(--ink); border-bottom:1px solid transparent; }
+.tx-inline:focus{ border-bottom:1px solid var(--accent); outline:none; }
+.persona-select{ flex:0 0 150px; font-size:13px; }
+.ticket-wrap{ position:relative; flex:0 0 120px; }
+.ticket-wrap .ticket{ font-family:var(--mono); font-size:13px; width:100%; }
+.ticket-warn{ position:absolute; top:100%; left:0; background:var(--warn); color:#fff; font-size:11px; padding:3px 8px; border-radius:6px; white-space:nowrap; z-index:5; }
+.tx-total{ font-family:var(--mono); font-weight:600; white-space:nowrap; }
+.icon-btn{ background:transparent; border:none; cursor:pointer; font-size:13px; color:var(--ink-soft); padding:4px 6px; border-radius:6px; }
+.icon-btn.danger:hover{ background:var(--warn-soft); color:var(--warn); }
+.chevron{ color:var(--ink-soft); font-size:11px; }
+.tx-detail{ padding:14px; border-top:1px solid var(--line); background:#FCFBF8; display:flex; flex-direction:column; gap:16px; }
+.detail-group h4{ margin:0 0 10px; font-size:12px; text-transform:uppercase; letter-spacing:.05em; color:var(--ink-soft); }
+.lock-note{ background:var(--warn-soft); color:var(--warn); font-size:12px; padding:8px 10px; border-radius:8px; margin-bottom:10px; }
+.grid3{ display:grid; grid-template-columns:repeat(auto-fill, minmax(140px,1fr)); gap:10px; }
+.money-grid{ grid-template-columns:repeat(auto-fill, minmax(120px,1fr)); }
+.field{ display:flex; flex-direction:column; gap:4px; font-size:11px; color:var(--ink-soft); }
+.field.wide{ grid-column:1/-1; }
+.field.disabled{ opacity:.5; }
+.field-input{ display:flex; align-items:center; border:1px solid var(--line); border-radius:7px; background:var(--surface); overflow:hidden; }
+.field-input input{ border:none; padding:8px 8px; font-size:14px; width:100%; background:transparent; color:var(--ink); }
+.field-input input:disabled{ background:#F0EEE8; cursor:not-allowed; }
+.field-input input:focus{ outline:none; }
+.field-input.money .prefix{ padding-left:8px; color:var(--ink-soft); font-family:var(--mono); }
+.field-input:focus-within{ border-color:var(--accent); }
+.checkbox-field{ display:flex; align-items:center; gap:8px; font-size:13px; color:var(--ink); padding-bottom:9px; }
+.row-total-line{ text-align:right; font-family:var(--mono); font-size:14px; padding-top:6px; border-top:1px solid var(--line); }
+
+.totals-bar{ margin-top:16px; display:flex; flex-wrap:wrap; gap:14px 20px; padding:14px 16px; background:var(--ink); color:var(--bg); border-radius:12px; font-family:var(--mono); font-size:13px; }
+.totals-bar b{ font-weight:600; }
+.totals-bar .grand{ margin-left:auto; font-size:15px; }
+.totals-bar .good{ color:#A9E6C6; }
+.totals-bar .bad{ color:#F3A493; }
+
+.cards-grid{ display:grid; grid-template-columns:repeat(auto-fit, minmax(180px,1fr)); gap:12px; margin-bottom:20px; }
+.card{ background:var(--surface); border:1px solid var(--line); border-radius:12px; padding:16px; }
+.card.compact{ padding:10px 16px; }
+.card-label{ font-size:11px; text-transform:uppercase; letter-spacing:.05em; color:var(--ink-soft); margin-bottom:6px; }
+.card-value{ font-family:var(--mono); font-size:24px; font-weight:600; }
+.card-sub{ font-size:12px; color:var(--ink-soft); margin-top:4px; }
+
+.two-col{ display:grid; grid-template-columns:1fr 1fr; gap:16px; margin-bottom:20px; }
+@media (max-width:720px){ .two-col{ grid-template-columns:1fr; } }
+.block{ background:var(--surface); border:1px solid var(--line); border-radius:12px; padding:16px; margin-bottom:16px; }
+.block h3{ font-family:var(--display); font-size:15px; margin:0 0 12px; }
+.kv{ display:flex; justify-content:space-between; padding:8px 0; border-bottom:1px solid var(--line); font-size:13px; font-family:var(--mono); }
+.kv:last-child{ border-bottom:none; }
+.kv.good b{ color:var(--accent); }
+.kv.bad b{ color:var(--warn); }
+.kv.strong{ font-size:14px; font-weight:700; }
+
+.method-table, .parciales-table{ width:100%; border-collapse:collapse; background:var(--surface); border-radius:12px; overflow:hidden; border:1px solid var(--line); }
+.method-table th, .method-table td, .parciales-table th, .parciales-table td{ padding:10px 14px; text-align:left; border-bottom:1px solid var(--line); font-size:13px; }
+.method-table th, .parciales-table th{ background:#FBF9F4; font-size:11px; text-transform:uppercase; letter-spacing:.04em; color:var(--ink-soft); }
+.method-table td:not(:first-child), .parciales-table td:nth-child(3){ font-family:var(--mono); }
+.total-row td{ font-weight:700; background:var(--accent-soft); }
+.muted-row{ color:var(--ink-soft); }
+.bad-text{ color:var(--warn); font-weight:600; }
+.locked-icon{ text-align:center; }
+.toggle-pill{ font-family:var(--mono); font-size:12px; padding:5px 10px; border-radius:20px; border:none; cursor:pointer; }
+.toggle-pill.ok{ background:var(--accent-soft); color:var(--accent); }
+.toggle-pill.off{ background:var(--warn-soft); color:var(--warn); }
+
+.tablero-scroll{ overflow-x:auto; border:1px solid var(--line); border-radius:12px; background:var(--surface); margin-bottom:20px; }
+.tablero-table{ border-collapse:collapse; width:100%; font-size:12px; }
+.tablero-table th, .tablero-table td{ padding:7px 10px; border-bottom:1px solid var(--line); border-right:1px solid var(--line); white-space:nowrap; }
+.tablero-table th{ background:#FBF9F4; font-size:10px; text-transform:uppercase; letter-spacing:.03em; color:var(--ink-soft); position:sticky; top:0; }
+.tablero-table tfoot td{ font-weight:700; background:var(--accent-soft); border-top:2px solid var(--accent); }
+.tablero-table .mono{ font-family:var(--mono); }
+.tablero-table .strong{ font-weight:700; }
+.tablero-grid{ display:grid; grid-template-columns:repeat(3, 1fr); gap:16px; }
+@media (max-width:820px){ .tablero-grid{ grid-template-columns:1fr; } }
+
+.history-list{ display:flex; flex-direction:column; gap:6px; }
+.history-item{ text-align:left; padding:12px 16px; border:1px solid var(--line); border-radius:10px; background:var(--surface); font-family:var(--mono); font-size:14px; cursor:pointer; color:var(--ink); }
+.history-item.active{ border-color:var(--accent); background:var(--accent-soft); }
+.history-item:hover{ border-color:var(--accent); }
+
+.foot{ text-align:center; font-size:11px; color:var(--ink-soft); padding:20px; max-width:600px; margin:0 auto; }
+`;
